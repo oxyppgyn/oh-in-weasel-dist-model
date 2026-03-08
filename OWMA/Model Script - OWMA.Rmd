@@ -1,0 +1,919 @@
+---
+title: "OWMA Weasel Model 2026"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# Parameters
+
+## Files
+
+`working_directory [char]`: The working directory, set with `setwd()`.
+
+`PA_obs_path [char]`: Path to presence-absence observations CSV data.
+
+`PA_locs_path [char]`: Path to presence-absence location CSV data.
+
+`PO_path [char]`: Path to presence-only CSV data.
+
+`shp_path [char]`: Path to a shapefile file boundary this project.
+
+`boundary_paths [vec(name = char)]` : A named vector of paths to boundaries to be used. These should be shapefiles, pointing to a file with the ".shp" extension. Names will be used to assign boundaries to models in `model_defs`.
+
+`covar_paths [vec(name = char)]`: A named vector of paths to custom (non-WorldClim) covariates to be used. These should be raster files such as tiff images. Names represent the name of the variable represented in the file, ex: "Grassland" for a file called "Grass_NLCD2011.tif". *intSDM* models will use the file name without the extension internally, rather than the name provided in this vector.
+
+## Config
+
+`species [vec(char)]`: A vector of species to include in this analysis.
+
+`max_spatial_error [int/float]`: The maximum spatial distance error (in meters) to include. Records with values higher than this will be filtered out.
+
+`date_cutoff [char]`: The earliest date to include in this analysis (formatted as MM/DD/YYYYY). Records with values lower than this will be filtered out.
+
+`reproject [bool]`: If rasters should be reprojected into the CRS of the species data.
+
+`species_proj [int]`: The projection code to use for coordinates provided with species data. This variable must be an integer, not a string.
+
+`pred_dims [vec(int, int)]`: Dimensions (X, Y) of the output prediction map(s).
+
+`quiet_workflow [bool]`: If the *intSDM* workflow should be quieted (minimally text output).
+
+`worldclim_res [int/float]`: The resolution of WorldClim covariates. This must be one of the options available from WorldClim, which are provided in minutes. This variable must be an integer or float, not a string.
+
+`project [char]`: The name to be used for this project internally for *intSDM* processes.
+
+`seed [int]`: The seed to use for this script, used for reproducibility.
+
+`PO_class_by [char]`: The name of the field defining which subset of data each record belongs to. A single likelihood will be created for each subset. This value is most often dataset names or a characteristic of the data such as what method was used to collect it. If only one likelihood is needed, a field must be created that contains only a single value.
+
+`PA_class_by [char]`: The name of the field defining which subset of data each record belongs to. A single likelihood will be created for each subset. This value is most often dataset names or a characteristic of the data such as what method was used to collect it. If only one likelihood is needed, a field must be created that contains only a single value.
+
+## Model
+
+`model_defs [list(name = list("species" = vec(char), "boundary" = char, "priors" = vec("range" = vec(num, num), "sigma" = vec(num, num)), "Custom" = vec(char), "WorldClim" = vec(char), "WorldCover" = vec(char)))]`: A nested list representing the variables included in each model to be built. The outermost list contains named lists with the name of the model. Model names are used to form file paths and must conform to the characters allowed in folder names for your system. These contain a list with six named elements, "species", "boundary", "priors", "Custom", "WorldClim", and "WorldCover" representing the species the model is for, the boundary to be used, the hyperparameters (priors), and the three sources for variables. The species value is used to filter datasets to only the species of interest; a model will be built independently for each species value included in this vector. The boundary value is used to find and add the area of interest for the model; the name provided here will be used to find a file path provided in `boundary_paths`. Priors specifies the two priors used for the model, range and sigma; this vector must use the names "range" and "sigma" when specifying these variables. All three covariate elements contain a vector of variable names that correspond to the names provided in `covar_paths` or the names of variables present in WorldClimand ESA WorldCover's datasets. If no variable from one source is used, an empty vector should still be added in that place.
+
+The following are valid options for variables from WorldClim and WorldCover:
+
+-   WorldClim: "tmin", "tmax", "tavg", "prec", "srad", "wind", "vapr," "elev".
+
+-   WorldCover: "trees", "grassland", "shrubs", "cropland", "built", "bare", "snow", "water", "wetland", "mangroves", "moss".
+
+Example of an appropriate object:
+
+``` r
+model_defs <- list(
+  "Model1" = list(
+    "species" = c("Long-tailed weasel"),
+    "boundary" = "FullState_Boundary",
+    "priors" = c("range" = c(100, 1), "sigma" = c(1, 0.5)),
+    "WorldClim" = c("tavg"),
+    "WorldCover" = c("trees", "grassland"),
+    "Custom" = c("Slope")
+  ),
+
+  "Model2" = list(
+    "species" = c("Long-tailed weasel", "Short-tailed weasel"),
+    "boundary" = "PartialState_Boundary",
+    "priors" = c("range" = c(69, 67), "sigma" = c(4, 20)),
+    "WorldClim" = c("tavg","vapr"),
+    "WorldCover" = c(),
+    "Custom" = c()
+  )
+)
+```
+
+`model_save [list(name = c(char))]`: A named list representing the models that should have point data extracted and converted to raster file. Names correspond to the names of models defined in `model_defs`. Values are vectors of which species' raster should be extracted (note that each model produces one map per species in your project if all were indicated in `model_defs`). The underlying data is stored as points and conversion to a raster results in some (minimal) data loss. If you experience missing lines of data horizontally or vertically in the output, adjust `rast_error`.
+
+`rast_error [c(numeric, numeric)]`: The difference between the output raster's dimensions and the dimensions specified in `pred_dims`. The value specified here will be subtracted from `pred_dims`. Making a slightly smaller output raster will prevent missing lines of data in the output. For a 400x400 prediction surface, an error of only 2 cells is required.
+
+```{r}
+#Files 
+working_dir <- 'C:/Users/Tanner/Desktop/OWMA_weasel_OHonly2'
+PA_obs_path <- 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/csv_copies/PA_obs.csv'
+PA_locs_path <- 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/csv_copies/PA_locs.csv'
+PO_path <- 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/csv_copies/PO.csv'
+boundary_paths <- list(
+  'OH-IN_Full' = 'C:/Users/Tanner/Desktop/OH_only_OWMA_weasel/OH_buffer.shp',
+  'OH-IN_NorthOnly' = 'C:/Users/Tanner/Desktop/OH_only_OWMA_weasel/OH_buffer.shp'
+)
+
+#boundary_paths <- list(
+#  'OH-IN_Full' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/OH-IN_5kmBuffer/OH-IN_5kmBuffer.shp',
+#  'OH-IN_NorthOnly' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/OH-IN_5kmBuffer_NorthOnly/OH-IN_5kmBuffer_NorthOnly.shp'
+#)
+
+covar_paths <- list(
+  'agriculture' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/rasters/agriculture.tif',
+  'developed' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/rasters/developed.tif',
+  'forest' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/rasters/forest.tif',
+  'grassland' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/rasters/grassland.tif',
+  'water' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/rasters/water.tif',
+  'SWE' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/rasters/swe.tif',
+  'precipitation' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/rasters/prcp.tif',
+  'tmax' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/rasters/tmax.tif',
+  'tmin' = 'C:/Users/Tanner/Dropbox/OH-IN weasel manuscript/Data/rasters/tmin.tif'
+)
+
+#Config
+species <- c('Long-tailed', 'Short-tailed', 'Least')
+max_spatial_error <- 5000
+date_cutoff <- '1/1/2015'
+reproject <- FALSE
+species_proj <- 4326
+
+pred_dims <- c(615, 556)
+quiet_workflow <- TRUE
+worldclim_res = 0.5
+project = 'OWMA Weasels 2026'
+seed <- 890 #Generated from numbergenerator.org/randomnumbergenerator/1-1000
+
+PO_class_by <- 'dataType'
+PA_class_by <- 'camType'
+
+#Model Info
+model_save <- list(
+  #'Long_tailed' = c('Long-tailed'), 
+  'Short_tailed' = c('Short-tailed')#, 
+  #'Least' = c('Least')
+)
+rast_error <- c(2, 2)
+```
+
+```{r}
+#Model Definitions
+model_defs <- list(
+  #Long-tailed best
+  'Long_tailed' = list(
+    'species' = c('Long-tailed'),
+    'boundary' = 'OH-IN_Full',
+    'priors' = c('range' = c(30, 0.1), 'sigma' = c(1, 0.1)),
+    'WorldClim' = c(),
+    'WorldCover' = c(),
+    'Custom' = c('developed', 'forest', 'grassland', 'water','SWE', 'tmax')
+  ),
+#  'Short_tailed' = list(
+#    'species' = c('Short-tailed'),
+#    'boundary' = 'OH-IN_NorthOnly',
+ #   'priors' = c('range' = c(30, 0.1), 'sigma' = c(1, 0.1)),
+  #  'WorldClim' = c(),
+  #'WorldCover' = c(),
+  #  'Custom' = c('agriculture', 'developed', 'forest', 'grassland', ,'SWE', 'tmax')
+  #),
+  'Least' = list(
+    'species' = c('Least'),
+    'boundary' = 'OH-IN_Full',
+    'priors' = c('range' = c(30, 0.1), 'sigma' = c(1, 0.1)),
+    'WorldClim' = c(),
+    'WorldCover' = c(),
+    'Custom' = c('agriculture', 'developed', 'grassland', 'water','SWE', 'tmax')
+  )
+)
+```
+
+```{r}
+#TEST MODELS
+
+#Model Definitions
+model_defs <- list(
+  #Long-tailed best
+  'Long_tailed' = list(
+    'species' = c('Long-tailed'),
+    'boundary' = 'OH-IN_Full',
+    'priors' = c('range' = c(30, 0.1), 'sigma' = c(1, 0.1)),
+    'WorldClim' = c(),
+    'WorldCover' = c(),
+    'Custom' = c('agriculture', 'developed', 'grassland', 'water', 'SWE', 'tmax')
+  ),
+  'Short_tailed' = list(
+    'species' = c('Short-tailed'),
+    'boundary' = 'OH-IN_NorthOnly',
+    'priors' = c('range' = c(30, 0.1), 'sigma' = c(1, 0.1)),
+    'WorldClim' = c(),
+    'WorldCover' = c(),
+    'Custom' = c('agriculture', 'developed', 'grassland','SWE', 'tmax')
+  ),
+  'Least' = list(
+    'species' = c('Least'),
+    'boundary' = 'OH-IN_Full',
+    'priors' = c('range' = c(30, 0.1), 'sigma' = c(1, 0.1)),
+    'WorldClim' = c(),
+    'WorldCover' = c(),
+    'Custom' = c('agriculture', 'developed', 'grassland', 'water','SWE', 'tmax')
+  )
+)
+```
+
+# Initialization
+
+## Install and Import Packages
+
+```{r message=FALSE, warning=FALSE}
+#List of Packages Used
+packages <- c('MCMCglmm','tidyverse','remotes','INLA','dplyr','lubridate','PointedSDMs','intSDM','sf','terra','ggplot2') #'stringr'
+
+#Check if Installed, Install if Not -- Import Regardless
+for (pkg in packages) {
+  if (!(require(pkg, character.only = TRUE))) {
+    if (pkg == 'INLA') {
+      install.packages(
+        'INLA',
+        repos = c(
+          getOption("repos"),
+          INLA = "https://inla.r-inla-download.org/R/stable"
+        ), 
+        dep = TRUE
+      )
+    } else if (pkg == 'ggregplot') {
+      remotes::install_github("gfalbery/ggregplot")
+    } else {
+      install.packages(pkg)
+    }
+    
+    library(pkg, character.only = TRUE)
+  }
+}
+
+remove(packages, pkg)
+```
+
+## Set Seed and Working Directory
+
+```{r}
+#Set Seed
+set.seed(seed)
+
+#Set Working Directory
+setwd(working_dir)
+```
+
+# Data Formatting
+
+## Read in Datasets
+
+```{r}
+PA_obs <- read.csv(file = PA_obs_path) 
+PA_locs <- read.csv(file = PA_locs_path) 
+PO <- read.csv(file = PO_path)
+```
+
+```{r}
+#Fix Column Types
+PO$date <- lubridate::mdy(PO$date)
+PA_obs$date <- lubridate::mdy(PA_obs$date)
+PA_obs$date2 <- lubridate::mdy(PA_obs$date2)
+PA_locs$setDate <- lubridate::mdy(PA_locs$setDate)
+PA_locs$retrieveDate <- lubridate::mdy(PA_locs$retrieveDate)
+
+#Create Generalized ID
+## Accounts for reused names between projects
+## Seperate with "::" incase it needs split later
+PA_obs$ID <- paste0(PA_obs$dataSource, "::", PA_obs$camera_site, '::', PA_obs$deployment)
+PA_locs$ID <- paste0(PA_locs$dataSource, "::", PA_locs$camera_site, '::', PA_locs$deployment)
+```
+
+## Filter
+
+```{r}
+#Presence-only Data
+PO <- PO |>
+  filter(
+    !is.na(latitude), # Rem NULL latitude
+    !is.na(longitude), # Rem NULL longitude
+    species %in% .env$species, # Rem "Unknown" records
+    positionalError_meters <= max_spatial_error, #Rem Large Spatial Error
+    !(is.na(positionalError_meters)), #Rem Unknown Error
+    !('S' %in% positionalError_meters), #Rem Unknown Error
+    date >= mdy(date_cutoff) #Remove dates before Cutoff
+  )
+
+#Presence-Absence Data
+PA_obs <- PA_obs |>
+  filter(
+    species %in% .env$species, #Rem "Unknown" records
+  ) 
+  
+PA_locs <- PA_locs |>
+  filter(
+    locFuzz == 0, #Rem fuzzed locations
+    positionalError_meters < max_spatial_error, #Rem Large Spatial Error
+    !(is.na(positionalError_meters)), #Rem Unknown Error
+  )
+```
+
+## Copy Columns for Presence-Absence Data
+
+```{r}
+#Copy Locational Data Columns to Presence-Absence Observations
+PA_obs <- merge(
+  x = PA_obs, 
+  y = PA_locs[,c('ID',PA_class_by,'latitude','longitude')], 
+  by = 'ID', 
+  all.x = TRUE
+)
+```
+
+## Save Copy of Datasets After Filter
+
+```{r}
+
+dir.create(file.path(working_dir, project))
+
+write.csv(PO, file = file.path(working_dir, project, 'PO_filter.csv'))
+
+write.csv(PA_obs, file.path(working_dir, project, 'PA_filter.csv'))
+```
+
+## Create Occupancy Matrix
+
+```{r}
+#Convert to Long Format
+PA_long <- PA_obs |>
+  group_by(ID, date, species) |>
+  summarize(count = n()) |>
+  ungroup()
+```
+
+```{r}
+#Create Columns for All Dates
+##Get List of All Dates in Range
+dates <- as.character(
+  seq(
+    min(PA_locs$setDate), 
+    max(PA_locs$retrieveDate), 
+    by = 'days'
+  )
+)
+
+##Get List of Sites
+sites <- unique(PA_locs$ID)
+
+##Initialize DF
+PA_occu <- data.frame(matrix(ncol = 8))
+
+##Add Columns and Row Value
+colnames(PA_occu) <- c('ID','date','day_num','species','detection','latitude','longitude', PA_class_by)
+```
+
+```{r}
+#Create Matrix
+for (i in 1:nrow(PA_locs)) {
+  for (sp in species) {
+    ##Get List of Days Camera was Active
+    dep_days <- as.character(
+      seq(
+        PA_locs[i,'setDate'],
+        PA_locs[i,'retrieveDate'],
+        by = 'days'
+        )
+    )
+    
+    ##Get Days with Observations for ID + Species
+    det_days <- filter(
+      PA_long, PA_long$ID == PA_locs[i, 'ID'] & PA_long$species == sp)$date
+    
+    ##Create Boolean Detection Values
+    if (length(det_days) > 0) {
+      occu_days <- ifelse(dep_days %in% det_days, 1, 0)
+    } else {
+      occu_days <- rep(0, length(dep_days))
+    }
+
+    ##Create DF
+    x <- data.frame(
+      ID = rep(PA_locs[i, 'ID'][[1]], length(dep_days)),
+      date = dep_days,
+      day_num = 1:length(dep_days),
+      species = rep(sp, length(dep_days)),
+      detection = occu_days,
+      latitude = rep(PA_locs[i, 'latitude'][[1]], length(dep_days)),
+      longitude = rep(PA_locs[i, 'longitude'][[1]], length(dep_days))
+    )
+    
+    x[[PA_class_by]] <- rep(PA_locs[i, PA_class_by][[1]], length(dep_days))
+    
+    ##Add DF to DF
+    PA_occu <- bind_rows(PA_occu, x)
+  }
+}
+
+#Remove Empty First Row
+PA_occu <- PA_occu[-c(1),] 
+
+#Save Data
+write.csv(PA_occu, file.path(working_dir, project, 'PA_occu_filter.csv'))
+
+remove(x, occu_days, dep_days, det_days, i, sp)
+```
+
+## Format Spatial Data
+
+```{r}
+#Convert Presence Data to ST
+PO <- st_as_sf(x = PO, coords = c('longitude','latitude'), crs = crs(paste0("+init=epsg:",species_proj)))
+PA_occu <- st_as_sf(x = PA_occu, coords = c('longitude','latitude'), crs = crs(paste0("+init=epsg:",species_proj)))
+
+#Add Boundaries
+boundaries <- list()
+for (boundary in names(boundary_paths)) {
+  shp <- st_read(boundary_paths[[boundary]])
+  
+  ##Save to Object
+  boundaries[[boundary]] <- shp
+}
+
+##Change Reference to WGS84
+if (crs(shp) != crs("+init=epsg:4326")) {
+  shp <- st_transform(shp, crs("+init=epsg:4326"))
+}
+if (crs(PO) != crs("+init=epsg:4326")) {
+  PO <- st_transform(PO, crs("+init=epsg:4326"))
+}
+if (crs(PA_occu) != crs("+init=epsg:4326")) {
+  PA_occu <- st_transform(PO, crs("+init=epsg:4326"))
+}
+
+##Assign Names from Path Object
+names(boundaries) <- names(boundary_paths)
+
+
+#Load Rasters
+rasters <- list()
+index <- 1
+
+#Get Rasters as Rast Objects
+for (var in covar_paths) {
+  ##Add Obj to Raster List
+  rasters[[names(covar_paths)[index]]] <- scale(terra::rast(var))
+  names(rasters[[index]]) <- names(covar_paths)[[index]]
+  
+  ##Reproject
+  if (reproject == TRUE) {
+    cat('\n----- Reprojecting Raster-----\n')
+    rasters[[index]] <- terra::project(x = rasters[[index]], crs(paste0("+init=epsg:", species_proj)))
+  }
+  ##Update Index
+  index <- index + 1
+  
+}
+```
+
+## Raster Covariance Matrix
+
+```{r}
+i <- 1
+for (r in rasters) {
+  if (i == 1) {
+    rast_stack <- c(r)
+  } else {
+    if (crs(r) != crs(rasters[[1]])) {
+      r <- project(r, rasters[[1]])
+    }
+    
+    #Resample to Same Extent
+    r <- terra::resample(x = r, y = rasters[[1]], method = 'average')
+    rast_stack <- c(rast_stack, r)
+
+  }
+  #Update Index
+  i <- i + 1
+}
+
+#Create Covariance Matrix
+cov_matrix <- data.frame(terra::layerCor(x = rast_stack, fun = 'cov', na.rm = TRUE))
+cor_matrix <- data.frame(terra::layerCor(x = rast_stack, fun = 'cor', na.rm = TRUE))
+
+#Save CSVs
+write.csv(cov_matrix, file.path(working_dir, project, 'raster_covariance.csv'))
+write.csv(cor_matrix, file.path(working_dir, project, 'raster_correlation.csv'))
+```
+
+# *intSDM* Model Workflow
+
+```{r message=FALSE}
+#Create Main Folder for Files
+dir.create(
+  path = file.path(working_dir, project), 
+  showWarnings = FALSE
+)
+dir.create(
+  path = file.path(working_dir, project, 'Model_Files'), 
+  showWarnings = FALSE
+)
+
+#Loop through Model Definitions
+i <- 1
+for (model in model_defs) {
+  skip <- FALSE
+  
+  #Check if Model Was Already Run
+  ##Folder Exists
+  if (dir.exists(file.path(working_dir, project, 'Model_Files', names(model_defs)[[i]]))) {
+    skip <- TRUE
+    
+    ##Don't Skip if No Folders in Model Dir
+    if (length(list.dirs(file.path(working_dir, project, 'Model_Files', names(model_defs)[[i]]), recursive = FALSE)) == 0) {
+      skip <- FALSE
+    }
+    
+    ##Check Number of Files in Each Folder
+    for (folder in list.dirs(file.path(working_dir, project, 'Model_Files', names(model_defs)[[i]]), recursive = FALSE)) {
+      ##If Any != 4, Don't Skip
+      if (length(list.files(folder)) != 4) {
+        skip <- FALSE
+      }
+    }
+  }
+      
+  #Skip Model if Indicated
+  if (skip == TRUE) {
+    cat('\n----- Results for model: "', names(model_defs)[[i]], '" already exist. Skipping to next model. -----\n', sep = '')
+    i <- i + 1
+    next
+  }
+  
+  #Start Workflow
+  cat('\n-------------------- Starting Workflow... --------------------\n')
+  cat('Model Name:', names(model_defs)[[i]], '\n')
+  workflow <- startWorkflow(
+    Projection =  "+proj=longlat +ellps=WGS84",
+    Species = model_defs[[i]][['species']],
+    saveOptions = list(projectName = project), 
+    Save = FALSE,
+    Quiet = quiet_workflow
+  )
+
+  ##Add Boundary
+  cat('\n----- Adding Boundary... -----\n')
+  workflow$addArea(Object = boundaries[[model_defs[[i]][['boundary']]]])
+  
+  ##Set Model Workflow Outputs
+  cat('\n----- Setting Workflow Outputs... -----\n')
+  workflow$workflowOutput(c('Model', 'Maps', 'Cross-validation'))
+
+  #Add Occurence Data
+  ##Presence-Only
+  cat('\n----- Adding Presence-Only Data... -----\n')
+  for (cls in unique(PO[[PO_class_by]])) {
+    
+    if (is.na(cls)) {
+      next
+    ### Skip adding if no records for this class
+    } else {
+      if (nrow(filter(filter(PO, !!sym(PO_class_by) == cls), species %in% model_defs[[i]][['species']])) == 0) {
+        next
+      }
+    }
+    
+    
+    workflow$addStructured(
+      dataStructured = filter(PO, !!sym(PO_class_by) == cls),
+      datasetType = 'PO',
+      datasetName = paste0('PA__', gsub(' ', '_', cls)),
+      speciesName = 'species',
+      generateAbsences = TRUE
+    )
+  }
+  
+  ##Presence-Absence
+  cat('\n----- Adding Presence-Absence Data... -----\n')
+  for (cls in unique(PA_obs[[PA_class_by]])) {
+    
+    if (is.na(cls)) {
+      next
+    }
+    
+    workflow$addStructured(
+      dataStructured = filter(PA_occu, !!sym(PA_class_by) == cls),
+      datasetType = 'PA',
+      datasetName = paste0('PA__', gsub(' ', '_', cls)),
+      speciesName = 'species',
+      responseName = 'detection',
+      trialsName ='day_num'
+    )
+  }
+  
+  #Add Custom Covariates
+  if (length(model$Custom) > 0) {
+    cat('\n----- Adding Custom Covariates... -----\n')
+    index = 1
+    for (var in model$Custom) {
+      cat('Adding Variable:', model$Custom[[index]], '\n')
+      workflow$addCovariates(Object = rasters[[var]], Function = scale)
+      
+      index <- index + 1
+    }
+  } else {
+    cat('\nNo Custom Covariates Added.\n')
+  }
+
+  #Add WorldClim Covariates
+  if (length(model$WorldClim) > 0) {
+    cat('\n----- Adding WorldClim Covariates... -----\n')
+    index <- 1
+    for (var in model$WorldClim) {
+      cat('Adding Variable:', model$WorldClim[[index]], '\n')
+      workflow$addCovariates(
+        worldClim = var, 
+        res = worldclim_res, 
+        Function = scale
+        )
+      index <- index + 1
+    }
+  } else {
+    cat('\nNo WorldClim Covariates Added.\n')
+  }
+  
+  #Add WorldCover Covariates
+  if (length(model$WorldCover) > 0) {
+    cat('\n----- Adding WorldCover Covariates... -----\n')
+    index <- 1
+    for (var in model$WorldCover) {
+      cat('Adding Variable:', model$WorldCover[[index]], '\n')
+      workflow$addCovariates(
+        landCover = var,
+        Function = scale
+        )
+      index <- index + 1
+    }
+  } else {
+    cat('\nNo WorldCover Covariates Added.\n')
+  }
+
+  #Add Mesh
+  cat('\n----- Adding Mesh... -----\n')
+  workflow$addMesh(
+    cutoff = 0.2 * 5,
+    max.edge = c(0.1, 0.24) * 80,
+    offset = c(0.1, 0.4) * 100
+  )
+  
+  #Specify Priors
+  cat('\n----- Specifying Priors... -----\n')
+  workflow$specifySpatial(
+    prior.range = c(model_defs[[i]][['priors']][['range1']], model_defs[[i]][['priors']][['range2']]), #c(30, 0.1),
+    prior.sigma = c(model_defs[[i]][['priors']][['sigma1']], model_defs[[i]][['priors']][['sigma2']])  #c(1, 0.1)
+  )
+  
+  workflow$specifyPriors(
+    effectNames = 'Intercept', 
+    Mean = 0, 
+    Precision = 1
+  )
+  
+  #Cross Validation
+  cat('\n----- Setting Cross Validating Info... -----\n')
+  workflow$crossValidation(Method = 'Loo')
+  
+  #Create Model
+  cat('\n----- Running Model... -----\n')
+  model_data <- sdmWorkflow(
+    workflow, 
+    inlaOptions = list(
+      num.threads = 1,
+      control.inla = list(
+        int.strategy = 'ccd',
+        h = 1e-4,
+        cmin = 0,
+        control.vb=list(
+          enable = FALSE
+        )
+      ),
+      control.compute = list(
+        return.marginals.predictor = TRUE
+        ),
+        safe = TRUE,
+        verbose = !(quiet_workflow),
+        inla.mode = 'experimental'
+      ),
+    predictionDim = pred_dims,
+    ipointsOptions = list(method = 'direct')
+  )
+  ##Create Folder for Current Model
+  dir.create(path = file.path(working_dir, project, 'Model_Files', names(model_defs)[[i]]), showWarnings = FALSE)
+  
+  #Copy RDS Files to New Folder
+  cat('\n----- Saving Files... -----\n')
+  #Save Data to RDS File
+  for (sp in names(model_data)) {
+    ##Create Folder for Current Model
+    dir.create(path = file.path(working_dir, project, 'Model_Files', names(model_defs)[[i]], sp))
+    for (rds in names(model_data[[sp]])) {
+      saveRDS(model_data[[sp]][[rds]], file = file.path(working_dir, project, 'Model_Files', names(model_defs)[[i]], sp, paste0(rds, '.rds')))
+    }
+  }
+  
+  #Update Index
+  i <- i + 1
+  
+  #Attempt to Free Some Memory
+  gc(full = TRUE, verbose = FALSE)
+}
+
+#Clean Up Temporary Objects
+remove(i, index, skip, cls, var, f, model)
+```
+
+# Model Statistics
+
+```{r}
+#Get a List of Folders to Look In
+RDS_files <- list(
+  c(), #paths
+  c(), #model name
+  c()  #species
+)
+
+for (model in names(model_defs)) {
+  for (sp in model_defs[[model]][['species']]) {
+  
+    ##Get Path of File
+    path <- file.path(working_dir, project, 'Model_Files', model, gsub(' ', '_', sp), 'Model.rds')
+    
+    ##Add to File List
+    RDS_files[[1]] <- append(RDS_files[[1]], path)
+    RDS_files[[2]] <- append(RDS_files[[2]], model)
+    RDS_files[[3]] <- append(RDS_files[[3]], sp)
+  }
+}
+
+#Read Each File and Get Statistics
+stats_df = c()
+for (i in 1:length(RDS_files[[1]])) {
+  ##Check that File Exists
+  if (!(file.exists(RDS_files[[1]][[i]]))) {
+    warning(paste0('The file ', RDS_files[[1]][[i]], ' does not exist. Skipping...'))
+    cat('\n')
+    next
+  }
+  
+  ##Read File
+  RDS_data <- readRDS(RDS_files[[1]][[i]])
+  
+  stats <- c(
+    
+    ### General Info
+    'model' = c(RDS_files[[2]][[i]]),
+    'species' = c(RDS_files[[3]][[i]]),
+    'covariates' = c(paste(RDS_data$spatCovs$name, collapse = ', ')),
+    
+    ### WAIC
+    'WAIC' = c(RDS_data$waic$waic),
+    'WAIC_p.eff' = c(RDS_data$waic$p.eff),
+    
+    ### DIC
+    'DIC' = c(RDS_data$dic$dic),
+    'DIC_p.eff' = c(RDS_data$dic$p.eff),
+    'DIC_mean.deviance' = c(RDS_data$dic$mean.deviance),
+    'DIC_deviance.mean' = c(RDS_data$dic$deviance.mean),
+    
+    ### Log marginal-likelihood
+    'log.marginal.likelihood' = c(RDS_data$mlik[[1]]),
+    
+    ### RSS
+    'RSS' = sum(RDS_data$residuals$deviance.residuals ** 2)
+  )
+  
+  ##Fix Excel Display Issue
+  if (startsWith(RDS_files[[2]][[i]],'-')) {
+    stats[['model']] <- paste0("'", RDS_files[[2]][[i]])
+  }
+  
+  ##Append to Dataset
+  if (length(stats_df) == 0) {
+    stats_df <- data.frame(t(data.frame(stats)))
+  } else {
+    stats_df <- rbind(stats_df, data.frame(t(data.frame(stats))))
+  }
+}
+
+#Write Data to CSV
+write.csv(x = stats_df, file = file.path(working_dir, project, 'Model_stats.csv'))
+
+#Clean Up
+remove(sp, i, stats, RDS_data, RDS_files)
+```
+
+# Save Rasters
+
+```{r}
+for (model in names(model_save)) {
+  for (sp in model_save[[model]]) {
+    #Read RDS Data
+    RDS_file <- file.path(working_dir, project, 'Model_Files', model, gsub(' ', '_', sp), 'Predictions.rds')
+    RDS_data <- readRDS(RDS_file)
+    RDS_data <- RDS_data$predictions
+    class(RDS_data) <- c('sf', 'data.frame') #IDK if this is needed
+    
+    #Convert Points to Raster
+    preds <- terra::vect(RDS_data)
+    rast <- terra::rast(
+      preds, 
+      ncols = pred_dims[1] - rast_error[[1]], 
+      nrows = pred_dims[2] - rast_error[[2]]
+    )
+    mean_rast <- raster::rasterize(preds, rast, field = 'mean')
+    std_rast <- raster::rasterize(preds, rast, field = 'sd')
+  
+    #Save Raster
+    raster::writeRaster(x = mean_rast, filename = file.path(working_dir, project, paste0(model, '__', gsub(' ', '_', sp), '__predict.tif')), overwrite = TRUE)
+    raster::writeRaster(x = std_rast, filename = file.path(working_dir, project, paste0(model, '__', gsub(' ', '_', sp), '__STD.tif')), overwrite = TRUE)
+    
+  }
+}
+
+#Clean Up
+remove(sp, model, preds, rast, mean_rast, std_rast)
+```
+
+# Effect Size Data
+
+```{r}
+model_data <- list()
+effsz_data <- data.frame()
+
+for (model in names(model_save)) {
+  model_data[[model]] <- list()
+  
+  for (sp in model_save[[model]]) {
+    
+    #Read RDS File
+    RDS_file <- file.path(working_dir, project, 'Model_Files', model, gsub(' ', '_', sp), 'Model.rds')
+    RDS_data <- readRDS(RDS_file)
+    
+    #Add to Model Object
+    model_data[[model]][[sp]] <- RDS_data
+    
+    #Pull Table of Stats
+    effsz_df <- model_data[[model]][[sp]][['summary.fixed']]
+    
+    #Fix Variable Column
+    effsz_df[['variable']] <- rownames(effsz_df)
+    rownames(effsz_df) <- 1:nrow(effsz_df)
+    
+    #Copy Model + Species Info
+    effsz_df[['model']] <- model
+    effsz_df[['species']] <- sp
+    
+    #Add to Full DataFrame
+    effsz_data <- rbind(effsz_data, effsz_df)
+  }
+}
+
+#Get Signifigance Info
+effsz_data[['sig']] <- ifelse(effsz_data[['0.025quant']] > 0 | effsz_data[['0.975quant']] < 0, 1, 0)
+
+#Save To CSV
+write.csv(effsz_data, file = file.path(working_dir, project, 'effect_sizes.csv'))
+```
+
+## Plots
+
+Currently, this is only made to handle one species per model in `model_save`. This will need to be updated if there are multiple models for a single species (i.e., if Model1 and Model2 are both for long-tailed weasels).
+
+```{r}
+#Order of Variables + Species, Change When Running with New Data
+## Leave as empty list to use default order in DF
+var_order = rev(names(covar_paths))
+sp_order = c('Long-tailed', 'Short-tailed', 'Least')
+
+#Filter Out Intercepts
+effsz_data_plt <- effsz_data[!(grepl('intercept', effsz_data$variable)), ]
+
+#Change Signifigance to Discrete Values for Color
+effsz_data_plt[['sig']] <- as.character(effsz_data_plt[['sig']])
+
+#Change Variable + Species Display Order
+if (length(var_order) != 0) {
+  effsz_data_plt[['variable']] <- factor(effsz_data_plt[['variable']], levels = var_order)
+}
+
+if (length(sp_order) != 0) {
+  effsz_data_plt[['species']] <- factor(effsz_data_plt[['species']], levels = sp_order)
+}
+
+#Create Plot
+effsz_plt <- ggplot(data = effsz_data_plt, aes(x=mean, y=variable, color=sig)) +
+  #Theme + Styling
+  theme_gray() +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank(), axis.title.y = element_blank(), legend.position = 'none') +
+  labs(x = 'Effect Size') +
+  geom_vline(xintercept = 0, linetype = 'longdash') +
+  
+  #Main Plot Elements
+  geom_point() + 
+  geom_errorbar(aes(xmin = effsz_data_plt[['0.025quant']], xmax = effsz_data_plt[['0.975quant']], width = 0.3)) +
+  facet_grid(~species, scales = 'free')  +
+  scale_color_manual(values=c("black", "brown3"))
+
+#Save Plot
+ggsave(
+  filename = file.path(working_dir, project, 'effect_size.png'),
+  plot = effsz_plt,
+  dpi = 600,
+  width = 6,
+  height = 4
+)
+
+effsz_plt
+```
